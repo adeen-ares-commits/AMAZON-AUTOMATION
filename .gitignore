@@ -1,0 +1,18 @@
+# Node dependencies
+apps/frontend/node_modules/
+apps/electron/node_modules/
+apps/backend/venv
+
+# Environment files
+apps/frontend/.env
+apps/backend/.env
+apps/electron/.env
+
+
+.env
+# Python cache
+__pycache__/
+
+
+# OS / editor files
+.DS_Store
