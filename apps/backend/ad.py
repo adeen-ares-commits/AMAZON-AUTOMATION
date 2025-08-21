@@ -1,4 +1,4 @@
-import os,re
+import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dotenv import load_dotenv, find_dotenv
@@ -54,8 +54,7 @@ ROW_WIDTH = 32
 FILLED_COLS = [
     COL_NO, COL_CATEGORY, COL_PRODUCTS, COL_CURRENT_MREV, COL_MONTHLY_MARKETCAP_1,
     # COL_YOUR_COMPETITOR, COL_COMP_MREV, COL_YOUR_PRICE, COL_FBA_FEES, COL_STORAGE_FEES,
-    # COL_PPU_20, COL_REV_20, COL_PPU_15, COL_REV_15, COL_PPU_10, COL_REV_10,
-    COL_UNITS_20,  COL_UNITS_15, COL_UNITS_10
+    COL_PPU_20, COL_UNITS_20, COL_REV_20, COL_PPU_15, COL_UNITS_15, COL_REV_15, COL_PPU_10, COL_UNITS_10, COL_REV_10
 ]
 def get_sheets_config():
     return SCOPES,  ROW_WIDTH
@@ -129,6 +128,111 @@ def _write_row(svc, title: str, row1: int, row_vals: List[str]):
         body={"values": [row_vals]},
     ).execute()
 
+def _insert_row_and_copy_template_format(
+    svc, sheet_id: int, insert_row0: int, column_count: int
+):
+    """
+    Insert a row at index insert_row0 and copy (from the template row now below it):
+      - Cell format (number formats, borders, fonts, colors)
+      - Formulas (without copying static values)
+      - Data validation rules (optional)
+      - Conditional formatting rules (optional)
+    """
+    src_row0 = insert_row0 + 1  # after insert, the original template is now here
+
+    requests = [
+        # 1) Insert the new row (no inheritance; we'll copy explicitly)
+        {
+            "insertDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": insert_row0,
+                    "endIndex": insert_row0 + 1,
+                },
+                "inheritFromBefore": False,
+            }
+        },
+
+        # 2) Copy ONLY formatting
+        {
+            "copyPaste": {
+                "source": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": src_row0,
+                    "endRowIndex": src_row0 + 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": column_count,
+                },
+                "destination": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": insert_row0,
+                    "endRowIndex": insert_row0 + 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": column_count,
+                },
+                "pasteType": "PASTE_FORMAT",
+                "pasteOrientation": "NORMAL",
+            }
+        }
+    ]
+
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests}
+    ).execute()
+
+
+def _format_cells_black_bg_white_font(svc, sheet_id: int, row0: int, col_indices: List[int]):
+    """Set background black + font white for specific cells (one row)."""
+    requests = []
+    for c in col_indices:
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": row0,
+                    "endRowIndex": row0 + 1,
+                    "startColumnIndex": c,
+                    "endColumnIndex": c + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0, "green": 0, "blue": 0},
+                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat.foregroundColor)"
+            }
+        })
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests}
+    ).execute()
+
+def _write_partial_cells(svc, title: str, row1: int, col_to_value: Dict[int, str]):
+    """
+    Update only the given cells in a row (1-based row index).
+    Keys in col_to_value are 0-based column indices.
+    """
+    if not col_to_value:
+        return
+    data = []
+    for c_idx, val in col_to_value.items():
+        # Only write non-empty values; skip empty strings to preserve existing formulas
+        if val == "":
+            continue
+        a1 = f"{title}!{_num_to_col(c_idx)}{row1}:{_num_to_col(c_idx)}{row1}"
+        data.append({"range": a1, "values": [[val]]})
+
+    if not data:
+        return
+
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"valueInputOption": "USER_ENTERED", "data": data}
+    ).execute()
+
 def _insert_duplicate_of_last_row(svc, sheet_id: int, title: str, column_count: int) -> int:
     """
     Finds the last filled row in the sheet, inserts a new row directly *below* it,
@@ -197,142 +301,6 @@ def _insert_duplicate_of_last_row(svc, sheet_id: int, title: str, column_count: 
 
     return new_row1
 
-def _write_partial_cells(svc, title: str, row1: int, col_to_value: Dict[int, str]):
-    """
-    Update only the given cells in a row (1-based row index).
-    Keys in col_to_value are 0-based column indices.
-    """
-    if not col_to_value:
-        return
-    data = []
-    for c_idx, val in col_to_value.items():
-        # Only write non-empty values; skip empty strings to preserve existing formulas
-        if val == "":
-            continue
-        a1 = f"{title}!{_num_to_col(c_idx)}{row1}:{_num_to_col(c_idx)}{row1}"
-        data.append({"range": a1, "values": [[val]]})
-
-    if not data:
-        return
-
-    svc.spreadsheets().values().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body={"valueInputOption": "USER_ENTERED", "data": data}
-    ).execute()
-
-
-def _insert_row_and_copy_template_format(svc, sheet_id: int, insert_row0: int, column_count: int):
-    """
-    Insert a new row at row index insert_row0 (0-based).
-    After insert, the original template row moves down to insert_row0+1.
-    We then copy only the FORMAT from the (now) template row to the inserted row.
-    """
-    # src_row0 = insert_row0 + 1 # after insert, the original template is now here
-    # requests = [
-    #     {
-    #         "insertDimension": {
-    #             "range": {
-    #                 "sheetId": sheet_id,
-    #                 "dimension": "ROWS",
-    #                 "startIndex": insert_row0,
-    #                 "endIndex": insert_row0 + 1
-    #             },
-    #             "inheritFromBefore": False
-    #         }
-    #     },
-    #     {
-    #         # Copy ONLY FORMATTING from the row below (template) into the newly inserted row
-    #         "copyPaste": {
-    #             "source": {
-    #                 "sheetId": sheet_id,
-    #                 "startRowIndex": src_row0,
-    #                 "endRowIndex": src_row0 + 1,
-    #                 "startColumnIndex": 0,
-    #                 "endColumnIndex": column_count
-    #             },
-    #             "destination": {
-    #                 "sheetId": sheet_id,
-    #                 "startRowIndex": insert_row0,
-    #                 "endRowIndex": insert_row0 + 1,
-    #                 "startColumnIndex": 0,
-    #                 "endColumnIndex": column_count
-    #             },
-    #             "pasteType": "PASTE_FORMAT",
-    #             "pasteOrientation": "NORMAL"
-    #         }
-    #     }
-    # ]
-    # svc.spreadsheets().batchUpdate(
-    #     spreadsheetId=SPREADSHEET_ID,
-    #     body={"requests": requests}
-    # ).execute()
-    requests = [
-        {
-            "insertDimension": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "dimension": "ROWS",
-                    "startIndex": insert_row0,
-                    "endIndex": insert_row0 + 1
-                },
-                "inheritFromBefore": False
-            }
-        },
-        {
-            # Copy ONLY FORMATTING from the row ABOVE into the newly inserted row
-            "copyPaste": {
-                "source": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": insert_row0 - 1,
-                    "endRowIndex": insert_row0,       # one row above
-                    "startColumnIndex": 0,
-                    "endColumnIndex": column_count
-                },
-                "destination": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": insert_row0,
-                    "endRowIndex": insert_row0 + 1,   # the new row
-                    "startColumnIndex": 0,
-                    "endColumnIndex": column_count
-                },
-                "pasteType": "PASTE_FORMAT",
-                "pasteOrientation": "NORMAL"
-            }
-        }
-    ]
-
-    # Run the batch update
-    svc.spreadsheets().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body={"requests": requests}
-    ).execute()
-
-def _format_cells_black_bg_white_font(svc, sheet_id: int, row0: int, col_indices: List[int]):
-    """Set background black + font white for specific cells (one row)."""
-    requests = []
-    for c in col_indices:
-        requests.append({
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": row0,
-                    "endRowIndex": row0 + 1,
-                    "startColumnIndex": c,
-                    "endColumnIndex": c + 1,
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0, "green": 0, "blue": 0},
-                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}}
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,textFormat.foregroundColor)"
-            }
-        })
-    svc.spreadsheets().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body={"requests": requests}
-    ).execute()
 
 # === Row Builder ===
 def _build_row_from_product(prod: Dict[str, Any],seller_type:str,country:str) -> List[str]:
@@ -351,8 +319,6 @@ def _build_row_from_product(prod: Dict[str, Any],seller_type:str,country:str) ->
     cat_rev_text = res.get("category_revenue", {}).get("text") or ""
     monthly_meta = res.get("monthly_revenue", {}).get("meta", {}) or {}
     monthly_parent_rev_text = monthly_meta.get("parent_level_revenue_text") or ""
-    cat_rev_text = re.sub(r'[^0-9.,]', '', cat_rev_text)
-    monthly_parent_rev_text = re.sub(r'[^0-9.,]', '', monthly_parent_rev_text)
 
     # cf          = res.get("competitors_flow", {}) or {}
     # picker_best = cf.get("picker_best", {}) or {}
@@ -378,25 +344,24 @@ def _build_row_from_product(prod: Dict[str, Any],seller_type:str,country:str) ->
     low_units  = gp.get("low_total_sales", "")
     base_units = gp.get("base_total_sales", "")
     high_units = gp.get("high_total_sales", "")
-    # print(low_units, base_units, high_units)
-    # low_revenue = gp.get("low_total_revenue", "")
-    # base_revenue = gp.get("base_total_revenue", "")
-    # high_revenue = gp.get("high_total_revenue", "")
-    # low_prof = gp.get("low_total_profit", "")
-    # base_prof = gp.get("base_total_profit_start_ads", "")
-    # high_prof = gp.get("high_total_profit", "")
-    # if low_prof != "" and low_units != "":
-    #     low_ppu = f"${low_prof / low_units:.2f}"
-    # else:
-    #     low_ppu = ""
-    # if base_prof != "" and base_units != "":
-    #     base_ppu = f"${base_prof / base_units:.2f}"
-    # else:
-    #     base_ppu = ""
-    # if high_prof != "" and high_units != "":
-    #     high_ppu = f"${high_prof / high_units:.2f}"
-    # else:
-    #     high_ppu = ""
+    low_revenue = gp.get("low_total_revenue", "")
+    base_revenue = gp.get("base_total_revenue", "")
+    high_revenue = gp.get("high_total_revenue", "")
+    low_prof = gp.get("low_total_profit", "")
+    base_prof = gp.get("base_total_profit_start_ads", "")
+    high_prof = gp.get("high_total_profit", "")
+    if low_prof != "" and low_units != "":
+        low_ppu = f"${low_prof / low_units:.2f}"
+    else:
+        low_ppu = ""
+    if base_prof != "" and base_units != "":
+        base_ppu = f"${base_prof / base_units:.2f}"
+    else:
+        base_ppu = ""
+    if high_prof != "" and high_units != "":
+        high_ppu = f"${high_prof / high_units:.2f}"
+    else:
+        high_ppu = ""
 
     # print("afect cols", AFFECTED_COLS)
     # print("afect cols", AFFECTED_COLS)
@@ -431,13 +396,7 @@ def _build_row_from_product(prod: Dict[str, Any],seller_type:str,country:str) ->
     row[COL_CATEGORY]            = _hyper(categoryUrl, keyword) if categoryUrl else keyword
     row[COL_PRODUCTS]            = _hyper(url, productname) if url else productname
     row[COL_CURRENT_MREV]        = monthly_parent_rev_text
-    if seller_type == "new_seller":
-        row[COL_MONTHLY_MARKETCAP_1+1] = cat_rev_text
-    else:
-        row[COL_MONTHLY_MARKETCAP_1] = cat_rev_text
-    
-
-
+    row[COL_MONTHLY_MARKETCAP_1] = cat_rev_text
 
 
     # row[COL_YOUR_COMPETITOR]     = _hyper(comp_url, comp_title) if (comp_url or comp_title) else ""
@@ -457,7 +416,7 @@ def _build_row_from_product(prod: Dict[str, Any],seller_type:str,country:str) ->
 
     if seller_type == 'new_seller':
         # for new seller, we need to clear the current mrev and units columns since it has no product yet
-        # row[COL_PRODUCTS+1] = row[COL_PRODUCTS]   #copies this value in case of new seller
+        row[COL_PRODUCTS+1] = row[COL_PRODUCTS]   #copies this value in case of new seller
         row[COL_CURRENT_MREV] = ""
         row[COL_UNITS_10] = ""
         row[COL_UNITS_15] = ""
@@ -487,7 +446,7 @@ def write_results_to_country_tabs(json_results: Dict[str, Any]):
     # svc = _sheets_service()
     additional_run_data = []
     for brand_block in json_results.get("runs", []):
-        sellerType = brand_block.get("sellerType")
+        sellerType = brand_block.get("seller_type")
         if sellerType == "vendor":
             SPREADSHEET_ID = VENDOR_SPREADSHEET_ID
         elif sellerType == "existing_seller":
@@ -513,9 +472,8 @@ def write_results_to_country_tabs(json_results: Dict[str, Any]):
 
             for prod in country_block.get("products", []):
                 # 1) Build values for this product
-                # sellerType = brand_block.get("sellerType")
-                print("Seller type",sellerType)
-                row_vals = _build_row_from_product(prod,sellerType,country)
+                print("Seller type", sellerType)
+                row_vals = _build_row_from_product(prod, sellerType, country)
 
                 # 2) Duplicate last filled row and get the new row index (1-based)
                 new_row1 = _insert_duplicate_of_last_row(svc, sheet_id, country, col_count)
@@ -535,37 +493,21 @@ def write_results_to_country_tabs(json_results: Dict[str, Any]):
                 # 4) Overwrite just those cells
                 _write_partial_cells(svc, country, new_row1, col_to_value)
 
-                insert_row0 = new_row1-1
+                # 5) Optional highlight: black bg + white font on filled columns
+                _format_cells_black_bg_white_font(svc, sheet_id, row0=new_row1 - 1, col_indices=FILLED_COLS)
 
+                print(f'[SHEETS] Duplicated last row and wrote row {new_row1} to "{country}" (No.={next_no})')
 
-                # 5) Apply black bg + white font on filled cells in the inserted row
-                if sellerType == 'new_seller':
-                    _format_cells_black_bg_white_font(svc, sheet_id, row0=insert_row0, col_indices=[COL_NO, COL_CATEGORY, COL_PRODUCTS,COL_CURRENT_MREV,COL_MONTHLY_MARKETCAP_1+1])
-                else:
-                    if sellerType  == 'vendor':
-                        new_cols = FILLED_COLS
-                        if country not in ["US", "CAN"]: 
-                            new_cols[-1] = ORIGINAL_COL_UNITS_10 -1
-                            new_cols[-2] = ORIGINAL_COL_UNITS_15 -1
-                            new_cols[-3] = ORIGINAL_COL_UNITS_10 + 3
-                            _format_cells_black_bg_white_font(svc, sheet_id, row0=insert_row0, col_indices=new_cols)
-                        else:
-                            new_cols[-1] = ORIGINAL_COL_UNITS_10 +2
-                            new_cols[-2] = ORIGINAL_COL_UNITS_15 +2
-                            new_cols[-3] = ORIGINAL_COL_UNITS_20 +2
-                            _format_cells_black_bg_white_font(svc, sheet_id, row0=insert_row0, col_indices=new_cols)
-                    else:  #existing seller
-                        new_cols = FILLED_COLS
-                        if country not in ["US", "CAN", "AUS"]:
-                            new_cols[-1] = ORIGINAL_COL_UNITS_20 +1
-                            new_cols[-2] = ORIGINAL_COL_UNITS_15 +1
-                            new_cols[-3] = ORIGINAL_COL_UNITS_10 +1
-                        else:
-                            pass
-                        _format_cells_black_bg_white_font(svc, sheet_id, row0=insert_row0, col_indices=new_cols)
+                # 6) Log run data (use new_row1; template_row1 no longer exists here)
+                additional_run_data.append({
+                    "row": new_row1,
+                    "country": country,
+                    "keyword": prod["keyword"],
+                    "csvname": prod["csvFile"],
+                    "csvpath": prod["csvFilePath"],
+                    "seller_type": sellerType
+                })
 
-                print(f'[SHEETS] Inserted+Wrote row {insert_row0+1} to "{country}" (No.={next_no})')
-                additional_run_data.append({"row":insert_row0+1, "country":country, "keyword": prod['keyword'], 'csvname': prod['csvFile'] , 'csvpath':prod['csvFilePath'] , 'seller_type':sellerType})
     return additional_run_data
 # === Local test runner (no scraper required) ===# === Local test runner (no scraper required) ===
 def main():
@@ -582,7 +524,7 @@ def main():
                 "seller_type": "new_seller",
                 "countries": [
                     {
-                        "name": "DE",
+                        "name": "UK",
                         "products": [
                             {
                                 "productname": "WILSON NFL Super Grip Composite Footballs",
@@ -592,7 +534,7 @@ def main():
                                 "csvFile" : "xyz", "csvFilePath" : "abc",
                                 "result": {
                                     "category_revenue": {"text": "4,768,718", "number": "4768718"},
-                                    "monthly_revenue": {"meta": {"parent_level_revenue_text": "231,767.51"}},
+                                    "monthly_revenue": {"meta": {"parent_level_revenue_text": "$231,767.51"}},
                                     # "competitors_flow": {
                                     #     "picker_best": {
                                     #         "product_details": "SwimWays Hydro Waterproof Football",
@@ -630,7 +572,7 @@ def main():
                                 "categoryUrl": "https://www.amazon.com/s?k=soccer+ball",
                                 "csvFile" : "xyz", "csvFilePath" : "abc",
                                 "result": {
-                                    "category_revenue": {"text": "$3,337,731", "number": "3337731"},
+                                    "category_revenue": {"text": "3,337,731", "number": "3337731"},
                                     "monthly_revenue": {"meta": {"parent_level_revenue_text": "$219,553.49"}},
                                     # "competitors_flow": {
                                     #     "picker_best": {

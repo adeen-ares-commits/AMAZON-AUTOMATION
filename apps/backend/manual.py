@@ -21,17 +21,27 @@ from sheet_writer import _hyper, _sheets_service, _get_sheet_id_and_cols,get_she
 load_dotenv(find_dotenv(), override=True)
 
 # === ENV ===
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "").strip()
+SPREADSHEET_ID = None
+EXISTING_SELLER_SPREADSHEET_ID = os.getenv("EXISTING_SELLER_SPREADSHEET_ID", "").strip()
+NEW_SELLER_SPREADSHEET_ID= os.getenv("NEW_SELLER_SPREADSHEET_ID", "").strip()
+VENDOR_SPREADSHEET_ID=os.getenv("VENDOR_SPREADSHEET_ID", "").strip()
+
 GOOGLE_CLIENT_EMAIL = os.getenv("GOOGLE_CLIENT_EMAIL", "").strip()
 GOOGLE_PRIVATE_KEY = (os.getenv("GOOGLE_PRIVATE_KEY", "") or "").replace("\\n", "\n")
 
 USER_DATA_DIR, PROFILE_DIR, CHROME_PATH, EXT_ID, CDP_PORT = get_configg()
+COL_PRODUCTS = 2
 COL_YOUR_COMPETITOR     = 6
 COL_COMP_MREV           = 7
 COL_YOUR_PRICE          = 9
 COL_FBA_FEES            = 11
 COL_STORAGE_FEES = 13
 SCOPES,  ROW_WIDTH = get_sheets_config()
+
+AFFECTED_COLS = [COL_YOUR_PRICE,COL_FBA_FEES,COL_STORAGE_FEES]
+ORIGINAL_COL_YOUR_PRICE = COL_YOUR_PRICE
+ORIGINAL_COL_FBA_FEES = COL_FBA_FEES
+ORIGINAL_COL_STORAGE_FEES = COL_STORAGE_FEES
 # === Google Sheets Helpers ===
 
 def _read_row(svc, title: str, row_number: int) -> List[str]:
@@ -49,6 +59,28 @@ def _read_row(svc, title: str, row_number: int) -> List[str]:
     
     return row_data
 
+def normalize_currency(d):
+    import re
+    currency_pattern = re.compile(r"(A\$|CA\$|AED|€|£|\$)") # Regex to capture currency symbols/letters
+    currency = None
+    for v in d.values():
+        m = currency_pattern.search(v["text"])
+        if m:
+            currency = m.group(1)
+            break
+    if not currency:
+        currency = "$"  # default fallback
+    
+    # Normalize each field
+    for k, v in d.items():
+        # Replace commas with dots, strip spaces
+        num_str = re.sub(r"[^\d.,]", "", v["text"]).replace(",", ".")
+        if not num_str:  # fallback to number field if text was empty
+            num_str = v["number"]
+        v["text"] = f"{currency}{num_str}"
+
+    return d
+    
 def open_browser(chrome_path, user_data_dir, profile_dir, cdp_port, ext_id, popup_visible=False):
     #open browser
     chrome = Path(chrome_path)
@@ -117,8 +149,31 @@ def close_browser(browser, ctx, pw):
         if pw:
             pw.stop()
 
+def _sheets_service():
+    if not (SPREADSHEET_ID and GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY):
+        raise RuntimeError("Missing SPREADSHEET_ID / GOOGLE_CLIENT_EMAIL / GOOGLE_PRIVATE_KEY.")
+    creds = service_account.Credentials.from_service_account_info(
+        {
+            "type": "service_account",
+            "client_email": GOOGLE_CLIENT_EMAIL,
+            "private_key": GOOGLE_PRIVATE_KEY,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        },
+        scopes=SCOPES,
+    )
+    return build("sheets", "v4", credentials=creds)
 
-def fill_in_row_with_new_values_for_country(row, column_indices, country, row_number):
+def _get_sheet_id_and_cols(svc, title: str):
+    meta = svc.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    for sh in meta.get("sheets", []):
+        props = sh.get("properties", {})
+        if props.get("title") == title:
+            grid = props.get("gridProperties", {}) or {}
+            return props.get("sheetId"), grid.get("columnCount", ROW_WIDTH)
+    raise ValueError(f'Sheet/tab "{title}" not found.')
+
+
+def fill_in_row_with_new_values_for_country(row, column_indices, country, row_number,seller_type,corresp_nums):
     """
     Write data to specific columns in an existing row and format them with black background and white text.
     
@@ -128,7 +183,16 @@ def fill_in_row_with_new_values_for_country(row, column_indices, country, row_nu
         country: Country sheet name (e.g., "US", "UK", etc.)
         row_number: 1-based row number to write to
     """
+    global SPREADSHEET_ID
+
     try:
+        if seller_type == 'new_seller':
+            SPREADSHEET_ID = NEW_SELLER_SPREADSHEET_ID
+        elif seller_type == 'existing_seller':
+            SPREADSHEET_ID = EXISTING_SELLER_SPREADSHEET_ID
+        else:
+            SPREADSHEET_ID = VENDOR_SPREADSHEET_ID
+        print("Updated Spread sheet id to ",SPREADSHEET_ID)
         svc = _sheets_service()
         
         # Get sheet metadata
@@ -162,19 +226,96 @@ def fill_in_row_with_new_values_for_country(row, column_indices, country, row_nu
         
         # Write the specific columns to the existing row
         # We need to write only the columns that have data
-        for col_idx in column_indices:
+        i=0
+        for i,col_idx in enumerate(column_indices):
+            # print(f"col_idx: {col_idx}", len(row), row[col_idx])
             if col_idx < len(row) and row[col_idx]:  # Only write non-empty values
                 # Convert column index to letter (A, B, C, etc.)
                 col_letter = _num_to_col(col_idx)
                 cell_range = f"{country}!{col_letter}{row_number}"
-                
-                # Write the value
-                svc.spreadsheets().values().update(
-                    spreadsheetId=SPREADSHEET_ID,
-                    range=cell_range,
-                    valueInputOption="USER_ENTERED",
-                    body={"values": [[row[col_idx]]]},
-                ).execute()
+                # # Write the value
+                if corresp_nums is None:
+                    print(f"writing value: {row[col_idx]}")
+                    svc.spreadsheets().values().update(
+                        spreadsheetId=SPREADSHEET_ID,
+                        range=cell_range,
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [[row[col_idx]]]},
+                    ).execute()
+                    continue
+
+                raw_val = row[col_idx]
+                # print(f"raw_val: {raw_val}")
+
+            # --- detect numeric part + currency symbol ---
+            if seller_type == 'vendor':
+                if i == 1:      #fba fees
+                    continue
+            import re
+            m = re.match(r"([A-Za-z$€£]+)?\s*([\d.,]+)", str(raw_val))
+            # print(f"m: {m}")
+            if m:
+                currency, _ = m.groups()
+            else:
+                currency, _ = "", raw_val
+            
+            if corresp_nums is not None:
+                num_val = corresp_nums[i]
+
+            # print(f"num_val: {num_val}", f"currency: {currency}")
+            # --- write numeric value ---
+            print(f"writing value: @ col_idx={col_idx} .................... {num_val}")
+            svc.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=cell_range,
+                valueInputOption="USER_ENTERED",
+                body={"values": [[num_val]]},
+            ).execute()
+
+            # --- format as currency if symbol detected ---
+            # if currency:
+            #     # map symbol/prefix → Google Sheets currency codes
+            #     cur_map = {
+            #         "€": "€",
+            #         "$": "$",
+            #         "A$": "$",
+            #         "CA$": "$",
+            #         "AED": "dh",
+            #         "£": "£",
+            #     }
+
+            #     cur_code = cur_map.get(currency, None)
+            #     print(f"cur_code: {cur_code}")
+            #     if cur_code:
+            #         svc.spreadsheets().batchUpdate(
+            #             spreadsheetId=SPREADSHEET_ID,
+            #             body={
+            #                 "requests": [
+            #                     {
+            #                         "repeatCell": {
+            #                             "range": {
+            #                                 "sheetId": sheet_id,
+            #                                 "startRowIndex": row0,
+            #                                 "endRowIndex": row0 + 1,
+            #                                 "startColumnIndex": col_idx,
+            #                                 "endColumnIndex": col_idx + 1,
+            #                             },
+            #                             "cell": {
+            #                                 "userEnteredFormat": {
+            #                                     "numberFormat": {
+            #                                         "type": "CURRENCY",
+            #                                         "pattern": f'[${cur_code}] #,##0.00',
+            #                                     }
+            #                                 }
+            #                             },
+            #                             "fields": "userEnteredFormat.numberFormat",
+            #                         }
+            #                     }
+            #                 ]
+            #             },
+            #         ).execute()
+            i+=1
+        
         
         # Format the written columns with black background and white text
         _format_cells_black_bg_white_font(svc, sheet_id, row0=row0, col_indices=column_indices)
@@ -222,8 +363,8 @@ def _format_cells_black_bg_white_font(svc, sheet_id: int, row0: int, col_indices
     ).execute()
 
 
-def find_competitor_data(df, keyword_phrase, country, row_number, browser, MAX_RETRIES=8):
-
+def find_competitor_data(df, keyword_phrase, country, row_number,seller_type, browser, MAX_RETRIES=8):
+    global AFFECTED_COLS, COL_YOUR_PRICE, COL_FBA_FEES, COL_STORAGE_FEES
     competitor_data = find_top_recent_product(df, keyword_phrase)
     print(f"competitor_data: {competitor_data}")
     #write to sheet
@@ -231,9 +372,16 @@ def find_competitor_data(df, keyword_phrase, country, row_number, browser, MAX_R
     comp_title = competitor_data["product_details"] or ""
     comp_url   = competitor_data["url"]          or ""
     comp_mrev  = competitor_data["parent_level_revenue"] or ""
-    row[COL_YOUR_COMPETITOR]     = _hyper(comp_url, comp_title) if (comp_url or comp_title) else ""
-    row[COL_COMP_MREV]           = comp_mrev
-    fill_in_row_with_new_values_for_country(row, [COL_YOUR_COMPETITOR, COL_COMP_MREV], country, row_number)
+    if seller_type != 'new_seller':
+        row[COL_YOUR_COMPETITOR]     = _hyper(comp_url, comp_title) if (comp_url or comp_title) else ""
+        row[COL_COMP_MREV]           = comp_mrev
+        fill_in_row_with_new_values_for_country(row, [COL_YOUR_COMPETITOR, COL_COMP_MREV], country, row_number,seller_type,None)
+    else:
+        row[COL_PRODUCTS+1]     = _hyper(comp_url, comp_title) if (comp_url or comp_title) else ""
+        row[COL_PRODUCTS+2]           = comp_mrev
+        fill_in_row_with_new_values_for_country(row, [COL_PRODUCTS+1, COL_PRODUCTS+2], country, row_number,seller_type,None)
+    
+    
     
     
     if comp_url != "":
@@ -248,21 +396,78 @@ def find_competitor_data(df, keyword_phrase, country, row_number, browser, MAX_R
                     close_all_tabs_first=False,
                     close_others_after_open=True,
                 )
+                # pm ={
+                #     "product_price": {
+                #         "text": "$3.42",
+                #         "number": 3.42
+                #     },
+                #     "fba_fees": {
+                #         "text": "$5.12",
+                #         "number": 5.12
+                #     },
+                #     "storage_fee_oct_dec": {
+                #         "text": "£6.74",
+                #         "number": 6.74
+                #     },
+                #     "storage_fee_jan_sep": {
+                #         "text": "AED6.74",
+                #         "number": 6.74
+                #     }
+                # }
                 print(f"prof metrics: {pm}")
+                pm = normalize_currency(pm)
+                print(pm)
                 #write prof metrics to sheet
                 price_text   = (pm.get("product_price", {}) or {}).get("text") or ""
+                price_num    = (pm.get("product_price", {}) or {}).get("number") or ""
                 fba_text     = (pm.get("fba_fees", {}) or {}).get("text") or ""
+                fba_num      = (pm.get("fba_fees", {}) or {}).get("number") or ""
                 today = datetime.now()
                 is_oct__nov_dec = today.month>=10
                 if is_oct__nov_dec:
                     storage_fee_text = pm.get("storage_fee_oct_dec", {}).get("text") or ""
+                    storage_fee_num = pm.get("storage_fee_oct_dec", {}).get("number") or ""
                 else:
                     storage_fee_text = pm.get("storage_fee_jan_sep", {}).get("text") or ""
+                    storage_fee_num = pm.get("storage_fee_jan_sep", {}).get("number") or ""
+                
+                #create 
+                corresp_nums = [ price_num, fba_num, storage_fee_num]
+                AFFECTED_COLS = [COL_YOUR_PRICE,COL_FBA_FEES,COL_STORAGE_FEES]
+    
+                if seller_type == 'existing_seller':
+                    if country not in ["US", "CAN", "AUS"]:
+                        for i,col in enumerate(AFFECTED_COLS):
+                            AFFECTED_COLS[i]+=1
+                        AFFECTED_COLS[0]-=1
+                    else:
+                        pass
+                        # for i,col in enumerate(AFFECTED_COLS):
+                        #     AFFECTED_COLS[i]-=2
+                elif seller_type == 'vendor':
+                    if country in ['US', 'CAN']:
+                        AFFECTED_COLS[2]+=2
+                        AFFECTED_COLS[1]+=2
+                    else:
+                        AFFECTED_COLS[2]+=3
+                else:     #new_seller
+                    # pass
+                    if country not in ["US", "CAN", "AUS"]:
+                        for i,col in enumerate(AFFECTED_COLS):
+                            AFFECTED_COLS[i]-=1
+                        AFFECTED_COLS[0]-=1
+                    else:
+                        for i,col in enumerate(AFFECTED_COLS):
+                            AFFECTED_COLS[i]-=2
+                
+                COL_YOUR_PRICE, COL_FBA_FEES, COL_STORAGE_FEES = AFFECTED_COLS[0], AFFECTED_COLS[1], AFFECTED_COLS[2]
 
-                row[COL_YOUR_PRICE]          = price_text
-                row[COL_FBA_FEES]            = fba_text
-                row[COL_STORAGE_FEES]        = storage_fee_text
-                fill_in_row_with_new_values_for_country(row, [COL_YOUR_PRICE,COL_FBA_FEES,COL_STORAGE_FEES],country,row_number)
+                row[COL_YOUR_PRICE] = price_text
+                row[COL_FBA_FEES] = fba_text
+                row[COL_STORAGE_FEES] = storage_fee_text
+                # print(row)
+                fill_in_row_with_new_values_for_country(row, [COL_YOUR_PRICE,COL_FBA_FEES,COL_STORAGE_FEES],country,row_number,seller_type,corresp_nums)
+                COL_YOUR_PRICE, COL_FBA_FEES, COL_STORAGE_FEES = ORIGINAL_COL_YOUR_PRICE, ORIGINAL_COL_FBA_FEES, ORIGINAL_COL_STORAGE_FEES
                 return
             
             except Exception as e:
@@ -273,7 +478,7 @@ def find_competitor_data(df, keyword_phrase, country, row_number, browser, MAX_R
     
     
 
-def process_manual_csv(row_number: int, country: str, df: pd.DataFrame, keyword_phrase: str, browser) -> Dict[str, Any]:
+def process_manual_csv(row_number: int, country: str, df: pd.DataFrame, keyword_phrase: str, seller_type: str, browser) -> Dict[str, Any]:
     """
     Process manual CSV upload:
     1. Print df.head()
@@ -304,6 +509,14 @@ def process_manual_csv(row_number: int, country: str, df: pd.DataFrame, keyword_
             }
         
         # Initialize Google Sheets service
+        global SPREADSHEET_ID
+        if seller_type == 'new_seller':
+            SPREADSHEET_ID = NEW_SELLER_SPREADSHEET_ID
+        elif seller_type == 'existing_seller':
+            SPREADSHEET_ID = EXISTING_SELLER_SPREADSHEET_ID
+        else:
+            SPREADSHEET_ID = VENDOR_SPREADSHEET_ID
+        print("Updated Spread sheet id to ",SPREADSHEET_ID)
         svc = _sheets_service()
         
         # Try to read the specified row, but don't fail if it doesn't exist
@@ -317,8 +530,12 @@ def process_manual_csv(row_number: int, country: str, df: pd.DataFrame, keyword_
             print(f"Row {row_number} doesn't exist yet - will create it")
         
         # Check if competitor columns are empty (or if row is new)
-        competitor_col = row_data[COL_YOUR_COMPETITOR] if len(row_data) > COL_YOUR_COMPETITOR else ""
-        comp_mrev_col = row_data[COL_COMP_MREV] if len(row_data) > COL_COMP_MREV else ""
+        if seller_type != 'new_seller':
+            competitor_col = row_data[COL_YOUR_COMPETITOR] if len(row_data) > COL_YOUR_COMPETITOR else ""
+            comp_mrev_col = row_data[COL_COMP_MREV] if len(row_data) > COL_COMP_MREV else ""
+        else:
+            competitor_col = row_data[COL_PRODUCTS+1] if len(row_data) > COL_PRODUCTS+1 else ""
+            comp_mrev_col = row_data[COL_PRODUCTS+2] if len(row_data) > COL_PRODUCTS+2 else ""
         
         print(f"Row {row_number} data:")
         print(f"  Row exists: {row_exists}")
@@ -328,12 +545,28 @@ def process_manual_csv(row_number: int, country: str, df: pd.DataFrame, keyword_
         # Check if both competitor columns are empty
         competitor_empty = not competitor_col or competitor_col.strip() == ""
         comp_mrev_empty = not comp_mrev_col or comp_mrev_col.strip() == ""
+
+        competitor_empty, comp_mrev_empty = not competitor_empty, not comp_mrev_empty
         
         if competitor_empty and comp_mrev_empty:
             print("✓ Competitor columns are empty - ready for data insertion")
             # i want to do the following part in a separate thread, i.e. it should send return message and continue this part as well
             
-            find_competitor_data(df, keyword_phrase, country, row_number,browser, MAX_RETRIES=8)
+            MAX_RETRIES = 8
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    find_competitor_data(df, keyword_phrase, country, row_number,seller_type,browser, MAX_RETRIES=8)
+                    break
+                except Exception as e:
+                    print(f"Error scraping competitor data: {e}")
+                    time.sleep(20)
+                    if attempt == MAX_RETRIES:
+                        print("[ERROR] Profitability: max retries reached.")
+                        return {
+                            "success": False,
+                            "error": error_msg,     
+                        }
+            
             # data_thread = threading.Thread(target=find_competitor_data, args=(df, keyword_phrase, country, row_number))
             # data_thread.daemon = True
             # data_thread.start()
@@ -370,7 +603,7 @@ def process_multiple_manually(runs_data):
     browser, ctx , pw = open_browser(CHROME_PATH, USER_DATA_DIR, PROFILE_DIR, CDP_PORT, EXT_ID)
     for run in runs_data:
         df = pd.read_csv(run["csvpath"])
-        result = process_manual_csv(run["row"], run["country"], df, run["keyword"],browser)
+        result = process_manual_csv(run["row"], run["country"], df, run["keyword"], run["seller_type"], browser)
         if result["success"]:
             print(f"✅ Run passed - further processing successful")
         else:
@@ -387,23 +620,33 @@ if __name__ == "__main__":
       3) python manual.py
     """
     import pandas as pd
+    import time
     
     # Create a sample DataFrame for testing
     
     
     csv_path = "C:/Users/hurai/Downloads/amz.csv"
     df = pd.read_csv(csv_path)
-    
+    seller_type = "new_seller"
     # Test parameters
-    test_row_number = 6  # Make sure this row exists in your sheet
-    test_country = "CAN"  # Make sure this tab exists
+    test_row_number = 4  # Make sure this row exists in your sheet
+    # test_country = "UK"  # Make sure this tab exists
+    # test_country = "UAE"
+    test_country = "DE"
+    # test_country = "AUS"
+    # test_country = "CAN"
+    # test_country = "US"
     test_keyword_phrase = "test product"
+
     
     print("=== Testing process_manual_csv ===")
     
     try:
-        result = process_manual_csv(test_row_number, test_country, df, test_keyword_phrase)
+        result = process_manual_csv(test_row_number, test_country, df, test_keyword_phrase,seller_type,None)
         print("Result:", result)
+        test_row_number +=1
+        result = process_manual_csv(test_row_number, test_country, df, test_keyword_phrase,seller_type,None)
+        print("result",result)
         
         if result["success"]:
             print("✅ Test passed - CSV processing successful")
@@ -415,4 +658,41 @@ if __name__ == "__main__":
         print(f"❌ Test failed with exception: {e}")
         import traceback
         traceback.print_exc()
+
+
+### CLI TESTING for prof metrics part, adding those values to sheet ###
+# if __name__ == "__main__":
+#     price_text = "€3.42"
+#     fba_text = "$5.12"
+#     storage_fee_text = "£6.74"
+#     # storage_fee_text = "AED6.74"
+#     # fba_text = "A$5.12"
+#     # storage_fee_text = "CA$6.74"
+#     price_num = 3.42
+#     fba_num = 5.12
+#     storage_fee_num = 6.74
+#     corresp_nums = [price_num, fba_num, storage_fee_num]
+#     row_number = 5
+#     country = "DE"
+#     seller_type = "new_seller"
+#     row = [""] * ROW_WIDTH
+
+#     AFFECTED_COLS = [COL_YOUR_PRICE,COL_FBA_FEES,COL_STORAGE_FEES]
+    
+#     if country not in ["US", "CAN", "AUS"]:
+#         for i,col in enumerate(AFFECTED_COLS):
+#             AFFECTED_COLS[i]-=1
+#         AFFECTED_COLS[0]-=1
+#     else:
+#         for i,col in enumerate(AFFECTED_COLS):
+#             AFFECTED_COLS[i]-=2
+    
+#     COL_YOUR_PRICE, COL_FBA_FEES, COL_STORAGE_FEES = AFFECTED_COLS[0], AFFECTED_COLS[1], AFFECTED_COLS[2]
+
+#     row[COL_YOUR_PRICE] = price_text
+#     row[COL_FBA_FEES] = fba_text
+#     row[COL_STORAGE_FEES] = storage_fee_text
+#     fill_in_row_with_new_values_for_country(row, [COL_YOUR_PRICE,COL_FBA_FEES,COL_STORAGE_FEES],country,row_number,seller_type,corresp_nums)
+#     COL_YOUR_PRICE, COL_FBA_FEES, COL_STORAGE_FEES = ORIGINAL_COL_YOUR_PRICE, ORIGINAL_COL_FBA_FEES, ORIGINAL_COL_STORAGE_FEES
+
 

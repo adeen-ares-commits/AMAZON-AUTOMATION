@@ -1,18 +1,19 @@
 {
   "runs": [
     {
-      "brand": "curlene",
+      "brand": "asd",
+      "sellerType": "new_seller",
       "countries": [
         {
-          "name": "UK",
+          "name": "US",
           "products": [
             {
-              "productname": "Petroleum Jelly",
+              "productname": "azd",
               "url": "https://www.amazon.co.uk/Curalene-Petroleum-Jelly-Original-10ml/dp/B09MZQKFVG",
               "keyword": "Petroleum Jelly",
               "categoryUrl": "https://www.amazon.co.uk/Body-Creams/b/ref=dp_bc_5?ie=UTF8&node=344273031",
               "csvFile": "Petroleum Jelly.csv",
-              "csvFilePath": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\2\\tmpuyujkns5.csv",
+              "csvFilePath": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\2\\tmpv_5tnxls.csv",
               "result": {
                 "inputs": {
                   "category_url": "https://www.amazon.co.uk/Body-Creams/b/ref=dp_bc_5?ie=UTF8&node=344273031",
@@ -20,19 +21,19 @@
                   "keyword": "Petroleum Jelly"
                 },
                 "category_revenue": {
-                  "text": "£1,934,820",
-                  "number": "£1,934,820"
+                  "text": "£29,823",
+                  "number": "£29,823"
                 },
                 "monthly_revenue": {
                   "meta": {
-                    "asin": "B09MZQKFVG",
+                    "asin": "",
                     "file_name": "",
                     "product_url": "https://www.amazon.co.uk/Curalene-Petroleum-Jelly-Original-10ml/dp/B09MZQKFVG",
-                    "parent_level_revenue": "£230.42",
-                    "parent_level_revenue_text": "£230.42",
+                    "parent_level_revenue": 0,
+                    "parent_level_revenue_text": 0,
                     "source_url": "https://www.amazon.co.uk/Curalene-Petroleum-Jelly-Original-10ml/dp/B09MZQKFVG",
                     "saved_csv": "",
-                    "scraped_at": "2025-08-20T01:53:37Z",
+                    "scraped_at": "2025-08-21T18:59:27Z",
                     "module": "monthlyrev"
                   }
                 },
@@ -59,36 +60,25 @@
                   }
                 },
                 "keywords_volumes": {
-                  "user_prompt": "petroleum jelly 4525\nvaseline petroleum jelly 2635\npetroleum jelly large 431\npetroleum jelly large tub 254\nvaseline 250ml petroleum jelly 156\nvaseline petroleum jelly travel size 111\noriginal vaseline petroleum jelly 97\nvaseline petroleum jelly 500ml 90\nvaseline petroleum jelly large 1kg 73\nsoft and precious petroleum jelly 70Aforementioned are the top keywords sorted by search volume.",
-                  "search_volumes": [
-                    4525,
-                    2635,
-                    431,
-                    254,
-                    156,
-                    111,
-                    97,
-                    90,
-                    73,
-                    70
-                  ]
+                  "user_prompt": "Cerebro skipped for new_seller.",
+                  "search_volumes": []
                 },
                 "gpt_projection": {
                   "response": {
-                    "base_total_sales": 6,
-                    "base_total_revenue": 75.98,
-                    "base_total_profit_start_ads": 31.66,
-                    "base_total_profit_end_ads": 37.99,
-                    "low_total_sales": 4,
-                    "low_total_revenue": 49.86,
-                    "low_total_profit": 20.78,
-                    "high_total_sales": 8,
-                    "high_total_revenue": 106.84,
-                    "high_total_profit": 44.52
+                    "base_total_sales": 0,
+                    "base_total_revenue": 0.0,
+                    "base_total_profit_start_ads": 0.0,
+                    "base_total_profit_end_ads": 0.0,
+                    "low_total_sales": 0,
+                    "low_total_revenue": 0.0,
+                    "low_total_profit": 0.0,
+                    "high_total_sales": 0,
+                    "high_total_revenue": 0.0,
+                    "high_total_profit": 0.0
                   }
                 },
                 "errors": [
-                  "category_revenue attempt 1 failed: XRAY not detected on any Amazon tab."
+                  "Cerebro skipped for new_seller."
                 ]
               }
             }

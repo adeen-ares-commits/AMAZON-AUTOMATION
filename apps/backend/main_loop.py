@@ -339,7 +339,8 @@ def run_single_product(
     *,
     category_url: str,
     product_url: str,
-    keyword: str
+    keyword: str,
+    seller_type=str
 ) -> Dict[str, Any]:
     """
     Boot Chrome+XRAY, run full pipeline for one product, return structured results.
@@ -451,124 +452,164 @@ def run_single_product(
 
 
     # # ---- Monthly revenue for THIS product ----
-    success = False
-    for attempt in range(1, MAX_RETRIES + 1):
-        meta = None
-        try:
-            print("[Info] Opening product for monthly revenue + profit calc.")
-            page = open_with_xray(
-                browser,
-                ext_id=EXT_ID,
-                target_url=product_url,
-                wait_secs=50,
-                popup_visible=False
-            )
-
-            # ---- SCRAPE RAW TEXT DIRECTLY FROM DOM ----
-            # <div class="sc-hNLePL ThELn">A$3,364.02</div>
-            val = page.locator("div.sc-hNLePL.ThELn").first
-            val.wait_for(state="visible", timeout=15_000)
-            value_text = (val.inner_text() or "").strip()
-
-            # Extract ASIN from URL (optional; keep if you still want it)
-            asin = ""
-            m = (re.search(r"/dp/([A-Z0-9]{10})", product_url, re.I)
-                or re.search(r"/gp/aw/d/([A-Z0-9]{10})", product_url, re.I)
-                or re.search(r"/product/([A-Z0-9]{10})", product_url, re.I))
-            if m:
-                asin = m.group(1)
-
-            # Build meta: use RAW string for both fields
-            meta = {
-                "asin": asin,
-                "file_name": "",
-                "product_url": product_url,
-                "parent_level_revenue": value_text,        # RAW
-                "parent_level_revenue_text": value_text,   # RAW
-                "source_url": page.url,
-                "saved_csv": "",
-                "scraped_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "module": "monthlyrev",
-            }
-            run_results["monthly_revenue"]["meta"] = meta
-
-            # SUCCESS: raw string must be non-empty
-            if value_text:
-                print(f"[OK] Monthly revenue scraped on attempt {attempt}.")
-                print("the is the value", value_text)
-                success = True
-                try:
-                    page.close()
-                except Exception:
-                    pass
-                break
-            else:
-                raise ValueError("parent_level_revenue is empty")
-
-        except Exception as e:
-            msg = f"run_monthlyrev attempt {attempt} failed: {e}"
-            print("[ERROR]", msg)
-            run_results["errors"].append(msg)
-            if attempt == MAX_RETRIES:
-                print("[ERROR] Monthly revenue flow: max retries reached.")
-        finally:
-            # Cleanup CSVs only on failed attempts (preserves your existing behavior)
-            if not (meta and str(meta.get("parent_level_revenue", "")).strip()):
-                for file in os.listdir(MONTHLY_REV_DOWNLOAD_DIR):
-                    if file.lower().endswith(".csv"):
-                        try:
-                            os.remove(os.path.join(MONTHLY_REV_DOWNLOAD_DIR, file))
-                        except Exception:
-                            pass
-
-    # ---- Cerebro: extract ASIN, search keyword, export CSV, GPT step ----
-    asin_match = re.search(r"/dp/([A-Z0-9]{10})", product_url)
-    ASIN = asin_match.group(1) if asin_match else None
-    if not ASIN:
-        msg = "[WARN] Could not parse ASIN from product_url; skipping Cerebro."
-        print(msg)
-        run_results["errors"].append(msg)
+    if seller_type == "new_seller":
+        meta = {
+            "asin": "",
+            "file_name": "",
+            "product_url": product_url,
+            "parent_level_revenue": 0,          # forced zero
+            "parent_level_revenue_text": 0,     # forced zero
+            "source_url": product_url,          # no page opened, so fall back to input URL
+            "saved_csv": "",
+            "scraped_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "module": "monthlyrev",
+        }
+        run_results["monthly_revenue"]["meta"] = meta
     else:
+        success = False
         for attempt in range(1, MAX_RETRIES + 1):
+            meta = None
             try:
-                print("[Info] Cerebro flow.")
-                product_page = open_amazon_page(ctx, product_url)
-                cerebro_tab = open_cerebro_from_xray(browser, product_page, ASIN, timeout_s=60)
-                cerebro_search(cerebro_tab, keyword)
-
-                csv_path = export_cerebro_csv(
-                    cerebro_tab,
-                    CEREBRO_DOWNLOAD_DIR,
-                    filename_hint=f"cerebro_{ASIN}_{keyword}.csv"
+                print("[Info] Opening product for monthly revenue + profit calc.")
+                page = open_with_xray(
+                    browser,
+                    ext_id=EXT_ID,
+                    target_url=product_url,
+                    wait_secs=50,
+                    popup_visible=False
                 )
-                print("[DONE] Cerebro CSV saved to:", csv_path)
 
-                user_prompt, search_volumes = get_keywords_volumes_from_csv(csv_path)
-                run_results["keywords_volumes"]["user_prompt"]    = user_prompt
-                run_results["keywords_volumes"]["search_volumes"] = search_volumes
+                # ---- SCRAPE RAW TEXT DIRECTLY FROM DOM ----
+                # <div class="sc-hNLePL ThELn">A$3,364.02</div>
+                val = page.locator("div.sc-hNLePL.ThELn").first
+                val.wait_for(state="visible", timeout=15_000)
+                value_text = (val.inner_text() or "").strip()
 
-                projections = get_gpt_response(user_prompt, search_volumes)
-                run_results["gpt_projection"]["response"] = projections
-                break
+                # Extract ASIN from URL (optional; keep if you still want it)
+                asin = ""
+                m = (re.search(r"/dp/([A-Z0-9]{10})", product_url, re.I)
+                    or re.search(r"/gp/aw/d/([A-Z0-9]{10})", product_url, re.I)
+                    or re.search(r"/product/([A-Z0-9]{10})", product_url, re.I))
+                if m:
+                    asin = m.group(1)
+
+                # Build meta: use RAW string for both fields
+                meta = {
+                    "asin": asin,
+                    "file_name": "",
+                    "product_url": product_url,
+                    "parent_level_revenue": value_text,        # RAW
+                    "parent_level_revenue_text": value_text,   # RAW
+                    "source_url": page.url,
+                    "saved_csv": "",
+                    "scraped_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "module": "monthlyrev",
+                }
+                run_results["monthly_revenue"]["meta"] = meta
+
+                # SUCCESS: raw string must be non-empty
+                if value_text:
+                    print(f"[OK] Monthly revenue scraped on attempt {attempt}.")
+                    print("the is the value", value_text)
+                    success = True
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                    break
+                else:
+                    raise ValueError("parent_level_revenue is empty")
+
             except Exception as e:
-                msg = f"cerebro attempt {attempt} failed: {e}"
+                msg = f"run_monthlyrev attempt {attempt} failed: {e}"
                 print("[ERROR]", msg)
                 run_results["errors"].append(msg)
                 if attempt == MAX_RETRIES:
-                    print("[ERROR] Cerebro: max retries reached.")
+                    print("[ERROR] Monthly revenue flow: max retries reached.")
             finally:
-                for file in os.listdir(CEREBRO_DOWNLOAD_DIR):
-                    if file.endswith(".csv"):
-                        try: os.remove(os.path.join(CEREBRO_DOWNLOAD_DIR, file))
-                        except Exception: pass
-    try:
-        for p in ctx.pages:
-            try:
-                p.close()
-            except Exception:
-                pass
-    except Exception:
-        pass
+                # Cleanup CSVs only on failed attempts (preserves your existing behavior)
+                if not (meta and str(meta.get("parent_level_revenue", "")).strip()):
+                    for file in os.listdir(MONTHLY_REV_DOWNLOAD_DIR):
+                        if file.lower().endswith(".csv"):
+                            try:
+                                os.remove(os.path.join(MONTHLY_REV_DOWNLOAD_DIR, file))
+                            except Exception:
+                                pass
+
+    # ---- Cerebro: extract ASIN, search keyword, export CSV, GPT step ----
+    # //here add if to check seller type and then proceed with Cerebro
+    if seller_type == "new_seller":
+        run_results["keywords_volumes"] = {
+            "user_prompt": "Cerebro skipped for new_seller.",
+            "search_volumes": []
+        }
+        run_results["gpt_projection"] = {
+            "response": {
+                "base_total_sales": 0,
+                "base_total_revenue": 0.0,
+                "base_total_profit_start_ads": 0.0,
+                "base_total_profit_end_ads": 0.0,
+                "low_total_sales": 0,
+                "low_total_revenue": 0.0,
+                "low_total_profit": 0.0,
+                "high_total_sales": 0,
+                "high_total_revenue": 0.0,
+                "high_total_profit": 0.0
+            }
+        }
+        run_results["errors"].append("Cerebro skipped for new_seller.")
+    else:
+        asin_match = re.search(r"/dp/([A-Z0-9]{10})", product_url)
+        ASIN = asin_match.group(1) if asin_match else None
+        if not ASIN:
+            msg = "[WARN] Could not parse ASIN from product_url; skipping Cerebro."
+            print(msg)
+            run_results["errors"].append(msg)
+        else:
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    print("[Info] Cerebro flow.")
+                    product_page = open_amazon_page(ctx, product_url)
+                    time.sleep(30)
+                    cerebro_tab = open_cerebro_from_xray(browser, product_page, ASIN, timeout_s=60)
+                    # time.sleep(30)
+                    cerebro_search(cerebro_tab, keyword)
+
+                    csv_path = export_cerebro_csv(
+                        cerebro_tab,
+                        CEREBRO_DOWNLOAD_DIR,
+                        filename_hint=f"cerebro_{ASIN}_{keyword}.csv"
+                    )
+                    print("[DONE] Cerebro CSV saved to:", csv_path)
+
+                    user_prompt, search_volumes = get_keywords_volumes_from_csv(csv_path)
+                    run_results["keywords_volumes"]["user_prompt"]    = user_prompt
+                    run_results["keywords_volumes"]["search_volumes"] = search_volumes
+
+                    projections = get_gpt_response(user_prompt, search_volumes)
+                    run_results["gpt_projection"]["response"] = projections
+                    break
+                except Exception as e:
+                    msg = f"cerebro attempt {attempt} failed: {e}"
+                    print("[ERROR]", msg)
+                    run_results["errors"].append(msg)
+                    if attempt == MAX_RETRIES:
+                        print("[ERROR] Cerebro: max retries reached.")
+                finally:
+                    for file in os.listdir(CEREBRO_DOWNLOAD_DIR):
+                        if file.endswith(".csv"):
+                            try: os.remove(os.path.join(CEREBRO_DOWNLOAD_DIR, file))
+                            except Exception: pass
+                            
+    if seller_type != "new_seller":
+        try:
+            for p in ctx.pages:
+                try:
+                    p.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # teardown for this product
     try:
@@ -593,6 +634,7 @@ def process_brands(payload: Dict[str, Any]) -> Dict[str, Any]:
       "brands": [
         {
           "brand": "...",
+          "seller_type": "vendor" or "existing_seller" or "new_seller",
           "countries": [
             {
               "name": "US",
@@ -611,7 +653,8 @@ def process_brands(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     for b in payload.get("brands", []):
         brand_name = (b.get("brand") or "").strip()
-        brand_block = {"brand": brand_name, "countries": []}
+        seller_type = b.get("sellerType", "")  # "vendor" or "existing_seller" or "new_seller"
+        brand_block = {"brand": brand_name, "sellerType": seller_type, "countries": []}
 
         for c in b.get("countries", []):
             country_name = (c.get("name") or "").strip()
@@ -629,7 +672,8 @@ def process_brands(payload: Dict[str, Any]) -> Dict[str, Any]:
                 result = run_single_product(
                     category_url=categoryUrl,
                     product_url=product_url,
-                    keyword=keyword
+                    keyword=keyword,
+                    seller_type=seller_type
                 )
 
                 country_block["products"].append({

@@ -41,6 +41,7 @@ class Country(BaseModel):
 
 class Brand(BaseModel):
     brand: str
+    sellerType: Optional[str] = None  # "existing_seller", "new_seller", or "vendor"
     countries: List[Country]
 
 class SubmissionRequest(BaseModel):
@@ -110,6 +111,7 @@ async def create_submission(request: SubmissionRequest):
             if valid_countries:
                 scraper_payload["brands"].append({
                     "brand": brand.brand,
+                    "sellerType": brand.sellerType,
                     "countries": valid_countries
                 })
 
@@ -225,6 +227,7 @@ async def create_submission_with_files(
             if valid_countries:
                 scraper_payload["brands"].append({
                     "brand": brand.brand,
+                    "sellerType": brand.sellerType,
                     "countries": valid_countries
                 })
 

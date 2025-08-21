@@ -183,6 +183,7 @@ def boot_and_xray(
         raise FileNotFoundError(f"Chrome not found: {chrome_path}")
 
     udd = Path(user_data_dir); udd.mkdir(parents=True, exist_ok=True)
+    reuse = False
 
     if cdp_port is None:
         cdp_port = _find_free_port()
@@ -211,6 +212,7 @@ def boot_and_xray(
         print(f"[info] Chrome launched and CDP ready on {cdp_port}")
     else:
         print(f"[info] Reusing existing Chrome CDP on {cdp_port}")
+        reuse=True
 
     cdp_url  = f"http://127.0.0.1:{cdp_port}"
     popup_url = f"chrome-extension://{ext_id}/popup.html"
@@ -232,6 +234,14 @@ def boot_and_xray(
             print("[info] Closed Helium popup.")
         except Exception:
             pass
+
+    if reuse:
+        # Close all existing pages in the context without closing the browser
+        for page in ctx.pages:
+            try:
+                page.close()
+            except Exception as e:
+                print(f"[warn] Could not close page: {e}")
 
     # 2) Open the target URL in a fresh page
     target_page = ctx.new_page()
